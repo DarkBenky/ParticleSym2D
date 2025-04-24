@@ -158,7 +158,7 @@ func (g *ParticleGrid) GetDensityOfTheNeighbors(p *ParticleSOA, x, y float64) (d
 }
 
 func (p *ParticleSOA) ApplyGravity(dt float64) {
-	gravityEffect := 9.81 * dt // Gravity constant scaled by dt
+	gravityEffect := 9.81 * dt * 10 // Gravity constant scaled by dt
 	for i := 0; i < len(p.vy); i++ {
 		p.vy[i] += gravityEffect
 	}
@@ -166,7 +166,7 @@ func (p *ParticleSOA) ApplyGravity(dt float64) {
 
 // Improve damping for stability
 func (p *ParticleSOA) ApplyDamping() {
-	damping := 0.95 // Stronger damping for stability
+	damping := 0.96 // Stronger damping for stability
 	for i := 0; i < len(p.vx); i++ {
 		p.vx[i] *= damping
 		p.vy[i] *= damping
@@ -184,7 +184,7 @@ func (p *ParticleSOA) ResolveCollisions(g *ParticleGrid) {
 		if cellX < 0 || cellX >= cellsPerCol || cellY < 0 || cellY >= cellsPerRow {
 			continue
 		}
-
+		
 		// Check potential collisions with particles in neighboring cells
 		for dy := -1; dy <= 1; dy++ {
 			for dx := -1; dx <= 1; dx++ {
@@ -383,7 +383,7 @@ func (p *ParticleSOA) Update(dt float64, g *ParticleGrid, gravity bool) {
 		p.vy[i] = (p.y[i] - prevY[i]) / dt
 	}
 
-	// Apply more damping at the end
+	// // Apply more damping at the end
 	p.ApplyDamping()
 
 	// Update the grid for density forces
@@ -579,9 +579,11 @@ func (p *ParticleSOA) InitParticles(numParticles int, screenWidth int, screenHei
 }
 
 type Game struct {
-	p       ParticleSOA
-	grid    ParticleGrid
-	gravity bool
+	p             ParticleSOA
+	grid          ParticleGrid
+	gravity       bool
+	spacePressed  bool      // Track if space was already pressed
+	gravityToggle time.Time // Time when gravity was last toggled
 }
 
 func (p *ParticleSOA) calculateTotalVelocity() float64 {
@@ -681,17 +683,27 @@ func drawLine(screen *ebiten.Image, x1, y1, x2, y2 int, clr color.Color) {
 
 func (g *Game) Update() error {
 	g.p.Update(fixedDt, &g.grid, g.gravity)
-	// check for mouse input and apply force
+
+	// Check for mouse input and apply force
 	if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
 		x, y := ebiten.CursorPosition()
-		g.p.ApplyForce(5000, float64(x), float64(y))
+		g.p.ApplyForce(400, float64(x), float64(y))
 	}
 	if ebiten.IsMouseButtonPressed(ebiten.MouseButtonRight) {
 		x, y := ebiten.CursorPosition()
-		g.p.ApplyForce(-5000, float64(x), float64(y))
+		g.p.ApplyForce(-400, float64(x), float64(y))
 	}
+
+	// Improved space key handling with debouncing
 	if ebiten.IsKeyPressed(ebiten.KeySpace) {
-		g.gravity = !g.gravity
+		// Only toggle if space wasn't already pressed and sufficient time has passed
+		if !g.spacePressed && time.Since(g.gravityToggle) > 250*time.Millisecond {
+			g.gravity = !g.gravity
+			g.gravityToggle = time.Now()
+		}
+		g.spacePressed = true
+	} else {
+		g.spacePressed = false
 	}
 
 	return nil
@@ -739,9 +751,9 @@ func (g *ParticleGrid) DrawDensity(screen *ebiten.Image) {
 
 func (g *Game) Draw(screen *ebiten.Image) {
 	screen.Fill(color.Black)
-	g.grid.DrawDensity(screen) // Draw the density heatmap
-	g.p.Draw(screen)           // Draw the particles
-	GraphTotalVelocity(&totalVelocity, screen)
+	// g.grid.DrawDensity(screen) // Draw the density heatmap
+	g.p.Draw(screen) // Draw the particles
+	// GraphTotalVelocity(&totalVelocity, screen)
 	averageVelocity := g.p.calculateTotalVelocity()
 	ebitenutil.DebugPrint(screen, fmt.Sprintf("Average Velocity: %.2f", averageVelocity))
 	fps := ebiten.CurrentFPS()
@@ -797,11 +809,11 @@ func main() {
 	ebiten.SetWindowTitle("Velocity Colored Particles")
 
 	// update TPS to 60 for smoother graphics
-	ebiten.SetTPS(120)
+	ebiten.SetTPS(480)
 
 	particles := &ParticleSOA{}
 	// Use a perfect square for a nice grid, e.g., 100 for 10x10, or adjust as needed
-	particles.InitParticles(2500, screenWidth, screenHeight) // Using fewer particles for stability
+	particles.InitParticles(4000, screenWidth, screenHeight) // Using fewer particles for stability
 
 	// Initialize the particle grid
 	particleGrid := &ParticleGrid{}
@@ -811,8 +823,10 @@ func main() {
 	particleGrid.GaussianBlurDensity()
 
 	game := &Game{
-		p:    *particles,
-		grid: *particleGrid,
+		p:             *particles,
+		grid:          *particleGrid,
+		spacePressed:  false,
+		gravityToggle: time.Now().Add(-1 * time.Second), // Initialize with past time
 	}
 
 	if err := ebiten.RunGame(game); err != nil {
