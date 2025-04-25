@@ -175,9 +175,9 @@ func (p *ParticleSOA) ApplyGravity(dt float64) {
 // }
 
 func (p *ParticleSOA) ApplyDamping() {
-	baseDamping := 0.98        // Base damping for slow particles
+	baseDamping := 0.90       // Base damping for slow particles
 	minDamping := 0.5          // Stronger damping for very fast particles
-	speedThresholdSq := 2500.0 // 50.0^2 - Threshold squared where stronger damping begins
+	speedThresholdSq := 2000.0 // 50.0^2 - Threshold squared where stronger damping begins
 
 	for i := 0; i < len(p.vx); i++ {
 		// Calculate current speed squared (much faster than using sqrt)
@@ -360,10 +360,7 @@ func (p *ParticleSOA) UpdateGrid(g *ParticleGrid) {
 
 // Streamline update function to avoid energy gain
 func (p *ParticleSOA) Update(dt float64, g *ParticleGrid, gravity bool) {
-	if gravity {
-		p.ApplyGravity(dt)
-	}
-
+	
 	// Store previous positions for velocity calculation
 	prevX := make([]float64, len(p.x))
 	prevY := make([]float64, len(p.y))
@@ -401,11 +398,11 @@ func (p *ParticleSOA) Update(dt float64, g *ParticleGrid, gravity bool) {
 	p.ResolveBoundaries()
 	times["ResolveBoundaries"] = time.Duration(float64(times["ResolveBoundaries"])*0.9 + float64(time.Since(start))*0.1)
 
-	// // Calculate new velocities based on position changes
-	// for i := 0; i < len(p.x); i++ {
-	// 	p.vx[i] = (p.x[i] - prevX[i]) / dt
-	// 	p.vy[i] = (p.y[i] - prevY[i]) / dt
-	// }
+	// Calculate new velocities based on position changes
+	for i := 0; i < len(p.x); i++ {
+		p.vx[i] = (p.x[i] - prevX[i]) / dt
+		p.vy[i] = (p.y[i] - prevY[i]) / dt
+	}
 
 	// calculate new positions based on new velocities
 	
@@ -426,6 +423,11 @@ func (p *ParticleSOA) Update(dt float64, g *ParticleGrid, gravity bool) {
 	start = time.Now()
 	p.ApplyDamping()
 	times["ApplyDamping"] = time.Duration(float64(times["ApplyDamping"])*0.9 + float64(time.Since(start))*0.1)
+
+	if gravity {
+		p.ApplyGravity(dt)
+	}
+
 
 	for i := 0; i < len(p.x); i++ {
 		p.x[i] += p.vx[i] * dt
