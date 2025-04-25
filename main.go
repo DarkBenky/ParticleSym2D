@@ -23,13 +23,14 @@ const (
 	cellSize      = ballRadius * 2
 	cellsPerRow   = screenHeight / cellSize
 	cellsPerCol   = screenWidth / cellSize
+	particleCount = 4000
 )
 
 type ParticleSOA struct {
-	x  []float64
-	y  []float64
-	vx []float64
-	vy []float64
+	x  [particleCount]float64
+	y  [particleCount]float64
+	vx [particleCount]float64
+	vy [particleCount]float64
 }
 
 type ParticleGrid struct {
@@ -50,7 +51,7 @@ func SetParticleGrid(p *ParticleSOA, g *ParticleGrid) {
 func (g *ParticleGrid) ClearGrid() {
 	for i := 0; i < cellsPerRow; i++ {
 		for j := 0; j < cellsPerCol; j++ {
-			g.grid[i][j] = nil
+			g.grid[i][j] = g.grid[i][j][:0] // Clear the slice without reallocating
 		}
 	}
 }
@@ -96,7 +97,7 @@ func (g *ParticleGrid) CalculateDensity() {
 
 func (g *ParticleGrid) GaussianBlurDensity() {
 	// Define a 3x3 Gaussian kernel
-	kernel := [3][3]float64{
+	var kernel = [3][3]float64{
 		{1.0 / 16.0, 2.0 / 16.0, 1.0 / 16.0},
 		{2.0 / 16.0, 4.0 / 16.0, 2.0 / 16.0},
 		{1.0 / 16.0, 2.0 / 16.0, 1.0 / 16.0},
@@ -119,13 +120,7 @@ func (g *ParticleGrid) GaussianBlurDensity() {
 		}
 	}
 
-	// Copy the blurred values back to the original density grid
-	for i := 0; i < cellsPerRow; i++ {
-		for j := 0; j < cellsPerCol; j++ {
-			g.density[i][j] = g.tempDensity[i][j]
-			g.tempDensity[i][j] = 0 // Reset tempDensity for next use
-		}
-	}
+	g.density = g.tempDensity // Swap the pointers
 }
 
 func (g *ParticleGrid) GetDensity(x, y float64) float64 {
@@ -137,39 +132,73 @@ func (g *ParticleGrid) GetDensity(x, y float64) float64 {
 	return g.density[cellY][cellX]
 }
 
-func (g *ParticleGrid) GetDensityOfTheNeighbors(p *ParticleSOA, x, y float64) (densities []float64, positions [][2]float64, currentCellDensity float64, pX, pY int) {
+func (g *ParticleGrid) GetDensityOfTheNeighbors(p *ParticleSOA, x, y float64) (densities [8]float64, positions [8][2]float64, currentCellDensity float64, pX, pY int) {
 	cellX := int(x / cellSize)
 	cellY := int(y / cellSize)
 	if cellX < 0 || cellX >= cellsPerCol || cellY < 0 || cellY >= cellsPerRow {
-		return nil, nil, 0, 0, 0
+		return
 	}
+
+	const (
+		halfOfCellSize = cellSize / 2
+	)
+
 	// Check the 8 neighboring cells
 	for dy := -1; dy <= 1; dy++ {
 		for dx := -1; dx <= 1; dx++ {
 			nCellX := cellX + dx
 			nCellY := cellY + dy
 			if nCellX >= 0 && nCellX < cellsPerCol && nCellY >= 0 && nCellY < cellsPerRow {
-				densities = append(densities, g.density[nCellY][nCellX])
-				positions = append(positions, [2]float64{float64(nCellX) * cellSize, float64(nCellY) * cellSize})
+				// densities = append(densities, g.density[nCellY][nCellX])
+				densities[dy*3+dx+4] = g.density[nCellY][nCellX]
+				// positions = append(positions, [2]float64{float64(nCellX) * cellSize - halfOfCellSize, float64(nCellY) * cellSize - halfOfCellSize})
+				positions[dy*3+dx+4] = [2]float64{float64(nCellX)*cellSize + halfOfCellSize, float64(nCellY)*cellSize + halfOfCellSize}
 			}
 		}
 	}
-	return densities, positions, g.density[cellY][cellX], cellX * cellSize, cellY * cellSize
+	return densities, positions, g.density[cellY][cellX], cellX*cellSize + halfOfCellSize, cellY*cellSize + halfOfCellSize
 }
 
 func (p *ParticleSOA) ApplyGravity(dt float64) {
-	gravityEffect := 9.81 * dt * 10 // Gravity constant scaled by dt
+	gravityEffect := 9.81 * dt // Gravity constant scaled by dt
 	for i := 0; i < len(p.vy); i++ {
 		p.vy[i] += gravityEffect
 	}
 }
 
-// Improve damping for stability
+// func (p *ParticleSOA) ApplyDamping() {
+// 	damping := 0.96 // Stronger damping for stability
+// 	for i := 0; i < len(p.vx); i++ {
+// 		p.vx[i] *= damping
+// 		p.vy[i] *= damping
+// 	}
+// }
+
 func (p *ParticleSOA) ApplyDamping() {
-	damping := 0.96 // Stronger damping for stability
+	baseDamping := 0.98        // Base damping for slow particles
+	minDamping := 0.5          // Stronger damping for very fast particles
+	speedThresholdSq := 2500.0 // 50.0^2 - Threshold squared where stronger damping begins
+
 	for i := 0; i < len(p.vx); i++ {
-		p.vx[i] *= damping
-		p.vy[i] *= damping
+		// Calculate current speed squared (much faster than using sqrt)
+		speedSq := p.vx[i]*p.vx[i] + p.vy[i]*p.vy[i]
+
+		// Calculate speed-dependent damping factor
+		dampingFactor := baseDamping
+
+		if speedSq > speedThresholdSq {
+			// Calculate damping strength based on how much speed exceeds threshold
+			// Map from [threshold, infinity] to [0.0, 1.0]
+			excessSpeedRatio := math.Min((speedSq-speedThresholdSq)/10000.0, 1.0)
+
+			// Interpolate between base and minimum damping
+			// As speed increases, damping decreases (gets stronger)
+			dampingFactor = baseDamping*(1.0-excessSpeedRatio) + minDamping*excessSpeedRatio
+		}
+
+		// Apply the calculated damping factor
+		p.vx[i] *= dampingFactor
+		p.vy[i] *= dampingFactor
 	}
 }
 
@@ -184,7 +213,7 @@ func (p *ParticleSOA) ResolveCollisions(g *ParticleGrid) {
 		if cellX < 0 || cellX >= cellsPerCol || cellY < 0 || cellY >= cellsPerRow {
 			continue
 		}
-		
+
 		// Check potential collisions with particles in neighboring cells
 		for dy := -1; dy <= 1; dy++ {
 			for dx := -1; dx <= 1; dx++ {
@@ -269,7 +298,7 @@ func (p *ParticleSOA) ResolveCollisions(g *ParticleGrid) {
 
 // ResolveBoundaries handles particle-boundary collisions with energy conservation.
 func (p *ParticleSOA) ResolveBoundaries() {
-	restitution := 0.7
+	restitution := 0.95
 	const epsilon = 0.0001
 	for i := 0; i < len(p.x); i++ {
 		// Left boundary
@@ -320,7 +349,7 @@ func init() {
 
 func (p *ParticleSOA) UpdateGrid(g *ParticleGrid) {
 	g.ClearGrid()
-	for i := 0; i < len(p.x); i++ {
+	for i := 0; i < particleCount; i++ {
 		cellX := int(p.x[i] / cellSize)
 		cellY := int(p.y[i] / cellSize)
 		if cellX >= 0 && cellX < cellsPerCol && cellY >= 0 && cellY < cellsPerRow {
@@ -343,11 +372,6 @@ func (p *ParticleSOA) Update(dt float64, g *ParticleGrid, gravity bool) {
 		prevY[i] = p.y[i]
 	}
 
-	// Apply damping first
-	start := time.Now()
-	p.ApplyDamping()
-	times["ApplyDamping"] = time.Duration(float64(times["ApplyDamping"])*0.9 + float64(time.Since(start))*0.1)
-
 	// Update positions based on current velocities
 	for i := 0; i < len(p.x); i++ {
 		p.x[i] += p.vx[i] * dt
@@ -355,7 +379,7 @@ func (p *ParticleSOA) Update(dt float64, g *ParticleGrid, gravity bool) {
 	}
 
 	// Update density grid
-	start = time.Now()
+	start := time.Now()
 	p.UpdateGrid(g) // Use the dedicated UpdateGrid method
 	times["SetParticleGrid"] = time.Duration(float64(times["SetParticleGrid"])*0.9 + float64(time.Since(start))*0.1)
 
@@ -377,14 +401,18 @@ func (p *ParticleSOA) Update(dt float64, g *ParticleGrid, gravity bool) {
 	p.ResolveBoundaries()
 	times["ResolveBoundaries"] = time.Duration(float64(times["ResolveBoundaries"])*0.9 + float64(time.Since(start))*0.1)
 
-	// Calculate new velocities based on position changes
-	for i := 0; i < len(p.x); i++ {
-		p.vx[i] = (p.x[i] - prevX[i]) / dt
-		p.vy[i] = (p.y[i] - prevY[i]) / dt
-	}
+	// // Calculate new velocities based on position changes
+	// for i := 0; i < len(p.x); i++ {
+	// 	p.vx[i] = (p.x[i] - prevX[i]) / dt
+	// 	p.vy[i] = (p.y[i] - prevY[i]) / dt
+	// }
+
+	// calculate new positions based on new velocities
+	
+	
 
 	// // Apply more damping at the end
-	p.ApplyDamping()
+	// p.ApplyDamping()
 
 	// Update the grid for density forces
 	p.UpdateGrid(g)
@@ -393,6 +421,16 @@ func (p *ParticleSOA) Update(dt float64, g *ParticleGrid, gravity bool) {
 	start = time.Now()
 	p.OptimizedApplyDensityForces(g)
 	times["ApplyDensityForces"] = time.Duration(float64(times["ApplyDensityForces"])*0.9 + float64(time.Since(start))*0.1)
+
+	// Apply damping first
+	start = time.Now()
+	p.ApplyDamping()
+	times["ApplyDamping"] = time.Duration(float64(times["ApplyDamping"])*0.9 + float64(time.Since(start))*0.1)
+
+	for i := 0; i < len(p.x); i++ {
+		p.x[i] += p.vx[i] * dt
+		p.y[i] += p.vy[i] * dt
+	}
 }
 
 func (p *ParticleSOA) OptimizedApplyDensityForces(g *ParticleGrid) {
@@ -431,8 +469,8 @@ func (p *ParticleSOA) OptimizedApplyDensityForces(g *ParticleGrid) {
 				netForceY := 0.0
 
 				// Check each neighboring cell
-				for dy := -2; dy <= 2; dy++ {
-					for dx := -2; dx <= 2; dx++ {
+				for dy := -1; dy <= 1; dy++ {
+					for dx := -1; dx <= 1; dx++ {
 						nCellX := cellX + dx
 						nCellY := cellY + dy
 
@@ -525,11 +563,6 @@ func (p *ParticleSOA) Draw(screen *ebiten.Image) {
 
 // Lower initial velocity for more stable simulation
 func (p *ParticleSOA) InitParticles(numParticles int, screenWidth int, screenHeight int) {
-	p.x = make([]float64, numParticles)
-	p.y = make([]float64, numParticles)
-	p.vx = make([]float64, numParticles)
-	p.vy = make([]float64, numParticles)
-
 	// Calculate grid dimensions
 	gridSize := int(math.Sqrt(float64(numParticles)))
 	if gridSize*gridSize < numParticles { // Adjust gridSize if numParticles is not a perfect square
@@ -584,6 +617,9 @@ type Game struct {
 	gravity       bool
 	spacePressed  bool      // Track if space was already pressed
 	gravityToggle time.Time // Time when gravity was last toggled
+	force         float64
+	ScrollX       float64
+	ScrollY       float64
 }
 
 func (p *ParticleSOA) calculateTotalVelocity() float64 {
@@ -684,14 +720,40 @@ func drawLine(screen *ebiten.Image, x1, y1, x2, y2 int, clr color.Color) {
 func (g *Game) Update() error {
 	g.p.Update(fixedDt, &g.grid, g.gravity)
 
+	// Properly handle wheel input as a delta
+	scrollY, scrollX := ebiten.Wheel()
+
+	// Only respond to non-zero scroll values
+	if scrollY != 0 || scrollX != 0 {
+		// Respond to the dominant scroll direction
+		primaryScroll := scrollY
+		if math.Abs(scrollX) > math.Abs(scrollY) {
+			primaryScroll = scrollX
+		}
+
+		// Apply force change based on scroll direction
+		if primaryScroll > 0 {
+			g.force += 100
+		} else {
+			g.force -= 100
+		}
+
+		// Optional: Clamp force to reasonable limits
+		if g.force < 100 {
+			g.force = 100
+		} else if g.force > 10000 {
+			g.force = 10000
+		}
+	}
+
 	// Check for mouse input and apply force
 	if ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft) {
 		x, y := ebiten.CursorPosition()
-		g.p.ApplyForce(400, float64(x), float64(y))
+		g.p.ApplyForce(g.force, float64(x), float64(y))
 	}
 	if ebiten.IsMouseButtonPressed(ebiten.MouseButtonRight) {
 		x, y := ebiten.CursorPosition()
-		g.p.ApplyForce(-400, float64(x), float64(y))
+		g.p.ApplyForce(-g.force, float64(x), float64(y))
 	}
 
 	// Improved space key handling with debouncing
@@ -779,6 +841,7 @@ func (g *Game) Draw(screen *ebiten.Image) {
 		}
 	}
 	ebitenutil.DebugPrintAt(screen, "Gravity: "+fmt.Sprintf("%t", g.gravity), 10, 50+(len(orderedKeys)*20))
+	ebitenutil.DebugPrintAt(screen, "Force: "+fmt.Sprintf("%0.2f", g.force), 10, 50+(len(orderedKeys)*20)+20)
 }
 
 func (g *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
@@ -809,11 +872,11 @@ func main() {
 	ebiten.SetWindowTitle("Velocity Colored Particles")
 
 	// update TPS to 60 for smoother graphics
-	ebiten.SetTPS(480)
+	ebiten.SetTPS(720)
 
 	particles := &ParticleSOA{}
 	// Use a perfect square for a nice grid, e.g., 100 for 10x10, or adjust as needed
-	particles.InitParticles(4000, screenWidth, screenHeight) // Using fewer particles for stability
+	particles.InitParticles(particleCount, screenWidth, screenHeight) // Using fewer particles for stability
 
 	// Initialize the particle grid
 	particleGrid := &ParticleGrid{}
